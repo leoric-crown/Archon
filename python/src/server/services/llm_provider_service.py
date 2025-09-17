@@ -438,3 +438,23 @@ async def validate_provider_instance(provider: str, instance_url: str | None = N
             "error_message": str(e),
             "validation_timestamp": time.time()
         }
+
+
+def get_token_param_for_provider(provider: str) -> str:
+    """
+    Get the correct token parameter name based on the provider.
+
+    OpenAI has deprecated 'max_tokens' in favor of 'max_completion_tokens' for all models.
+    Other providers (like Ollama) still use 'max_tokens'.
+
+    Args:
+        provider: The provider name (openai, ollama, google, etc.)
+
+    Returns:
+        String with the parameter name ('max_tokens' or 'max_completion_tokens')
+    """
+    if provider == "openai":
+        return "max_completion_tokens"
+    else:
+        # All other providers (ollama, google, etc.) still use max_tokens
+        return "max_tokens"

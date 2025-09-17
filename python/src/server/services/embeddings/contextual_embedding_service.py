@@ -65,18 +65,25 @@ Please give a short succinct context to situate this chunk within the overall do
                 # Get model from provider configuration
                 model = await _get_model_choice(provider)
 
-                response = await client.chat.completions.create(
-                    model=model,
-                    messages=[
+                # Get the correct token parameter for this provider
+                from ..llm_provider_service import get_token_param_for_provider
+                token_param = get_token_param_for_provider(provider or "openai")
+
+                # Build the API call parameters
+                api_params = {
+                    "model": model,
+                    "messages": [
                         {
                             "role": "system",
                             "content": "You are a helpful assistant that provides concise contextual information.",
                         },
                         {"role": "user", "content": prompt},
                     ],
-                    temperature=0.3,
-                    max_tokens=200,
-                )
+                    "temperature": 0.3,
+                    token_param: 200,
+                }
+
+                response = await client.chat.completions.create(**api_params)
 
                 context = response.choices[0].message.content.strip()
                 contextual_text = f"{context}\n---\n{chunk}"
@@ -122,7 +129,7 @@ async def _get_model_choice(provider: str | None = None) -> str:
     # Handle empty model case - fallback to provider-specific defaults or explicit config
     if not model:
         search_logger.warning(f"chat_model is empty for provider {provider_name}, using fallback logic")
-        
+
         if provider_name == "ollama":
             # Try to get OLLAMA_CHAT_MODEL specifically
             try:
@@ -143,7 +150,7 @@ async def _get_model_choice(provider: str | None = None) -> str:
         else:
             # OpenAI or other providers
             model = "gpt-4o-mini"
-    
+
     search_logger.debug(f"Using model from credential service: {model}")
 
     return model
@@ -187,19 +194,26 @@ async def generate_contextual_embeddings_batch(
 
             batch_prompt += "For each chunk, provide a short succinct context to situate it within the overall document for improving search retrieval. Format your response as:\\nCHUNK 1: [context]\\nCHUNK 2: [context]\\netc."
 
-            # Make single API call for ALL chunks
-            response = await client.chat.completions.create(
-                model=model_choice,
-                messages=[
+            # Get the correct token parameter for this provider
+            from ..llm_provider_service import get_token_param_for_provider
+            token_param = get_token_param_for_provider(provider or "openai")
+
+            # Build the API call parameters
+            api_params = {
+                "model": model_choice,
+                "messages": [
                     {
                         "role": "system",
                         "content": "You are a helpful assistant that generates contextual information for document chunks.",
                     },
                     {"role": "user", "content": batch_prompt},
                 ],
-                temperature=0,
-                max_tokens=100 * len(chunks),  # Limit response size
-            )
+                "temperature": 0,
+                token_param: 100 * len(chunks),  # Limit response size
+            }
+
+            # Make single API call for ALL chunks
+            response = await client.chat.completions.create(**api_params)
 
             # Parse response
             response_text = response.choices[0].message.content
