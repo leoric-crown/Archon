@@ -557,7 +557,7 @@ Format your response as JSON:
             )
 
             # Get the correct token parameter for this provider
-            from ..llm_provider_service import get_token_param_for_provider
+            from ..llm_provider_service import get_token_param_for_provider, should_exclude_temperature
             token_param = get_token_param_for_provider(provider or "openai")
 
             # Build the API call parameters
@@ -572,8 +572,11 @@ Format your response as JSON:
                 ],
                 "response_format": {"type": "json_object"},
                 token_param: 500,
-                "temperature": 0.3,
             }
+
+            # Only add temperature for models that support it
+            if not should_exclude_temperature(model_choice):
+                api_params["temperature"] = 0.3
 
             response = await client.chat.completions.create(**api_params)
 

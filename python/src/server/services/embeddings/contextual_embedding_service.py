@@ -66,7 +66,7 @@ Please give a short succinct context to situate this chunk within the overall do
                 model = await _get_model_choice(provider)
 
                 # Get the correct token parameter for this provider
-                from ..llm_provider_service import get_token_param_for_provider
+                from ..llm_provider_service import get_token_param_for_provider, should_exclude_temperature
                 token_param = get_token_param_for_provider(provider or "openai")
 
                 # Build the API call parameters
@@ -79,9 +79,12 @@ Please give a short succinct context to situate this chunk within the overall do
                         },
                         {"role": "user", "content": prompt},
                     ],
-                    "temperature": 0.3,
                     token_param: 200,
                 }
+
+                # Only add temperature for models that support it
+                if not should_exclude_temperature(model):
+                    api_params["temperature"] = 0.3
 
                 response = await client.chat.completions.create(**api_params)
 
@@ -195,7 +198,7 @@ async def generate_contextual_embeddings_batch(
             batch_prompt += "For each chunk, provide a short succinct context to situate it within the overall document for improving search retrieval. Format your response as:\\nCHUNK 1: [context]\\nCHUNK 2: [context]\\netc."
 
             # Get the correct token parameter for this provider
-            from ..llm_provider_service import get_token_param_for_provider
+            from ..llm_provider_service import get_token_param_for_provider, should_exclude_temperature
             token_param = get_token_param_for_provider(provider or "openai")
 
             # Build the API call parameters
@@ -208,9 +211,12 @@ async def generate_contextual_embeddings_batch(
                     },
                     {"role": "user", "content": batch_prompt},
                 ],
-                "temperature": 0,
                 token_param: 100 * len(chunks),  # Limit response size
             }
+
+            # Only add temperature for models that support it
+            if not should_exclude_temperature(model_choice):
+                api_params["temperature"] = 0
 
             # Make single API call for ALL chunks
             response = await client.chat.completions.create(**api_params)

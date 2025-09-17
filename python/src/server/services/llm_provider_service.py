@@ -458,3 +458,29 @@ def get_token_param_for_provider(provider: str) -> str:
     else:
         # All other providers (ollama, google, etc.) still use max_tokens
         return "max_tokens"
+
+
+def should_exclude_temperature(model: str) -> bool:
+    """
+    Check if a model requires temperature to be excluded from API calls.
+
+    Some OpenAI reasoning models (like o1, gpt-5) only support the default temperature
+    and will error if a custom temperature is provided.
+
+    Args:
+        model: The model name being used
+
+    Returns:
+        True if temperature should be excluded, False otherwise
+    """
+    # Reasoning models that don't support custom temperature
+    reasoning_model_patterns = [
+        "o1", "o1-preview", "o1-mini", "gpt-5"
+    ]
+
+    model_lower = model.lower()
+    for pattern in reasoning_model_patterns:
+        if pattern in model_lower:
+            return True
+
+    return False
