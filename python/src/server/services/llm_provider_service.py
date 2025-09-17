@@ -5,6 +5,7 @@ Provides a unified interface for creating OpenAI-compatible clients for differen
 Supports OpenAI, Ollama, and Google Gemini.
 """
 
+import hashlib
 import time
 from contextlib import asynccontextmanager
 from typing import Any
@@ -19,6 +20,10 @@ logger = get_logger(__name__)
 # Settings cache with TTL
 _settings_cache: dict[str, tuple[Any, float]] = {}
 _CACHE_TTL_SECONDS = 300  # 5 minutes
+
+# Client cache with TTL
+_client_cache: dict[str, tuple[openai.AsyncOpenAI, float]] = {}
+_CLIENT_CACHE_TTL_SECONDS = 1800  # 30 minutes
 
 
 def _get_cached_settings(key: str) -> Any | None:
@@ -36,6 +41,28 @@ def _get_cached_settings(key: str) -> Any | None:
 def _set_cached_settings(key: str, value: Any) -> None:
     """Cache settings with current timestamp."""
     _settings_cache[key] = (value, time.time())
+
+
+def _get_cached_client(key: str) -> openai.AsyncOpenAI | None:
+    """Get cached client if not expired."""
+    if key in _client_cache:
+        client, timestamp = _client_cache[key]
+        if time.time() - timestamp < _CLIENT_CACHE_TTL_SECONDS:
+            return client
+        else:
+            # Expired, remove from cache
+            del _client_cache[key]
+    return None
+
+
+def _set_cached_client(key: str, client: openai.AsyncOpenAI) -> None:
+    """Cache client with current timestamp."""
+    _client_cache[key] = (client, time.time())
+
+
+def _generate_client_cache_key(provider_name: str, base_url: str | None, api_key_hash: str) -> str:
+    """Generate a cache key for the client based on configuration."""
+    return f"{provider_name}:{base_url or 'default'}:{api_key_hash[:8]}"
 
 
 @asynccontextmanager
@@ -58,6 +85,9 @@ async def get_llm_client(provider: str | None = None, use_embedding_provider: bo
         openai.AsyncOpenAI: An OpenAI-compatible client configured for the selected provider
     """
     client = None
+    provider_name = None
+    api_key = None
+    final_base_url = None
 
     try:
         # Get provider configuration from database settings
@@ -97,7 +127,30 @@ async def get_llm_client(provider: str | None = None, use_embedding_provider: bo
             # For Ollama, don't use the base_url from config - let _get_optimal_ollama_instance decide
             base_url = provider_config["base_url"] if provider_name != "ollama" else None
 
-        logger.info(f"Creating LLM client for provider: {provider_name}")
+        # For Ollama, we need to get the actual base URL before checking cache
+        if provider_name == "ollama":
+            final_base_url = await _get_optimal_ollama_instance(
+                instance_type=instance_type,
+                use_embedding_provider=use_embedding_provider,
+                base_url_override=base_url
+            )
+        elif provider_name == "google":
+            final_base_url = base_url or "https://generativelanguage.googleapis.com/v1beta/openai/"
+        else:
+            final_base_url = base_url
+
+        # Generate cache key for client reuse
+        api_key_hash = hashlib.md5((api_key or "").encode()).hexdigest()
+        client_cache_key = _generate_client_cache_key(provider_name, final_base_url, api_key_hash)
+
+        # Check if we have a cached client
+        cached_client = _get_cached_client(client_cache_key)
+        if cached_client:
+            logger.info(f"Using cached LLM client for provider: {provider_name} (cache key: {client_cache_key[:20]}...)")
+            yield cached_client
+            return
+
+        logger.info(f"Creating new LLM client for provider: {provider_name} (cache key: {client_cache_key[:20]}...)")
 
         if provider_name == "openai":
             if not api_key:
@@ -119,6 +172,10 @@ async def get_llm_client(provider: str | None = None, use_embedding_provider: bo
                             api_key="ollama",
                             base_url=ollama_base_url,
                         )
+                        # Update cache key and final_base_url for fallback
+                        final_base_url = ollama_base_url
+                        api_key_hash = hashlib.md5(b"ollama").hexdigest()
+                        client_cache_key = _generate_client_cache_key("ollama", final_base_url, api_key_hash)
                         logger.info(f"Ollama fallback client created successfully with base URL: {ollama_base_url}")
                     else:
                         raise ValueError("OpenAI API key not found and no Ollama instances available")
@@ -131,19 +188,12 @@ async def get_llm_client(provider: str | None = None, use_embedding_provider: bo
                 logger.info("OpenAI client created successfully")
 
         elif provider_name == "ollama":
-            # Enhanced Ollama client creation with multi-instance support
-            ollama_base_url = await _get_optimal_ollama_instance(
-                instance_type=instance_type,
-                use_embedding_provider=use_embedding_provider,
-                base_url_override=base_url
-            )
-
             # Ollama requires an API key in the client but doesn't actually use it
             client = openai.AsyncOpenAI(
                 api_key="ollama",  # Required but unused by Ollama
-                base_url=ollama_base_url,
+                base_url=final_base_url,
             )
-            logger.info(f"Ollama client created successfully with base URL: {ollama_base_url}")
+            logger.info(f"Ollama client created successfully with base URL: {final_base_url}")
 
         elif provider_name == "google":
             if not api_key:
@@ -151,12 +201,17 @@ async def get_llm_client(provider: str | None = None, use_embedding_provider: bo
 
             client = openai.AsyncOpenAI(
                 api_key=api_key,
-                base_url=base_url or "https://generativelanguage.googleapis.com/v1beta/openai/",
+                base_url=final_base_url,
             )
             logger.info("Google Gemini client created successfully")
 
         else:
             raise ValueError(f"Unsupported LLM provider: {provider_name}")
+
+        # Cache the newly created client for future use
+        if client:
+            _set_cached_client(client_cache_key, client)
+            logger.info(f"Cached new LLM client for provider: {provider_name} (cache key: {client_cache_key[:20]}...)")
 
         yield client
 
@@ -175,12 +230,12 @@ async def _get_optimal_ollama_instance(instance_type: str | None = None,
                                        base_url_override: str | None = None) -> str:
     """
     Get the optimal Ollama instance URL based on configuration and health status.
-    
+
     Args:
         instance_type: Preferred instance type ('chat', 'embedding', 'both', or None)
         use_embedding_provider: Whether this is for embedding operations
         base_url_override: Override URL if specified
-        
+
     Returns:
         Best available Ollama instance URL
     """
@@ -276,11 +331,11 @@ async def get_embedding_model(provider: str | None = None) -> str:
 async def get_embedding_model_with_routing(provider: str | None = None, instance_url: str | None = None) -> tuple[str, str]:
     """
     Get the embedding model with intelligent routing for multi-instance setups.
-    
+
     Args:
         provider: Override provider selection
         instance_url: Specific instance URL to use
-        
+
     Returns:
         Tuple of (model_name, instance_url) for embedding operations
     """
@@ -309,14 +364,14 @@ async def get_embedding_model_with_routing(provider: str | None = None, instance
         return "text-embedding-3-small", None
 
 
-async def validate_provider_instance(provider: str, instance_url: str | None = None) -> dict[str, any]:
+async def validate_provider_instance(provider: str, instance_url: str | None = None) -> dict[str, Any]:
     """
     Validate a provider instance and return health information.
-    
+
     Args:
         provider: Provider name (openai, ollama, google, etc.)
         instance_url: Instance URL for providers that support multiple instances
-        
+
     Returns:
         Dictionary with validation results and health status
     """
